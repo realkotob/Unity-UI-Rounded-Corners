@@ -1,4 +1,4 @@
-﻿using Nobi.UiRoundedCorners;
+using Nobi.UiRoundedCorners;
 using UnityEditor;
 using UnityEngine;
 using UnityEngine.UI;
@@ -7,7 +7,7 @@ namespace Nobi.UiRoundedCorners {
 	[ExecuteInEditMode]                             //Required to do validation with OnEnable()
 	[DisallowMultipleComponent]                     //You can only have one of these in every object
 	[RequireComponent(typeof(RectTransform))]
-	public class ImageWithIndependentRoundedCorners : MonoBehaviour {
+	public class ImageWithIndependentRoundedCorners : MonoBehaviour, IMaterialModifier {
 		private static readonly int prop_halfSize = Shader.PropertyToID("_halfSize");
 		private static readonly int prop_radiuses = Shader.PropertyToID("_r");
 		private static readonly int prop_rect2props = Shader.PropertyToID("_rect2props");
@@ -43,6 +43,16 @@ namespace Nobi.UiRoundedCorners {
 
 			Validate();
 			Refresh();
+
+			if (image != null) {
+				image.SetMaterialDirty();
+			}
+		}
+
+		private void OnDisable() {
+			if (image != null) {
+				image.SetMaterialDirty();
+			}
 		}
 
 		private void OnRectTransformDimensionsChange() {
@@ -52,40 +62,53 @@ namespace Nobi.UiRoundedCorners {
 		}
 
 		private void OnDestroy() {
-			if (image != null) {
-				image.material = null;      //This makes so that when the component is removed, the UI material returns to null
-			}
-
 			DestroyHelper.Destroy(material);
-			image = null;
 			material = null;
+
+			if (image != null) {
+				image.SetMaterialDirty();
+			}
+			image = null;
 		}
 
 		public void Validate() {
-			if (material == null) {
-				material = new Material(Shader.Find("UI/RoundedCorners/IndependentRoundedCorners"));
-			}
-
 			if (image == null) {
 				TryGetComponent(out image);
-			}
-
-			if (image != null) {
-				image.material = material;
 			}
 
 			if (image is Image uiImage && uiImage.sprite != null) {
 				outerUV = UnityEngine.Sprites.DataUtility.GetOuterUV(uiImage.sprite);
 			}
+
+			if (image != null) {
+				image.SetMaterialDirty();
+			}
 		}
 
 		public void Refresh() {
+			if (material == null) return;
+
 			var rect = ((RectTransform)transform).rect;
 			RecalculateProps(rect.size);
 			material.SetVector(prop_rect2props, rect2props);
 			material.SetVector(prop_halfSize, rect.size * .5f);
 			material.SetVector(prop_radiuses, r);
 			material.SetVector(prop_OuterUV, outerUV);
+		}
+
+		// IMaterialModifier — supplies the rounded-corner material at render time without
+		// writing to Graphic.m_Material, so prefab instances never get a material override.
+		public Material GetModifiedMaterial(Material baseMaterial) {
+			if (!isActiveAndEnabled) return baseMaterial;
+
+			if (material == null) {
+				var shader = Shader.Find("UI/RoundedCorners/IndependentRoundedCorners");
+				if (shader == null) return baseMaterial;
+				material = new Material(shader) { hideFlags = HideFlags.HideAndDontSave };
+			}
+
+			Refresh();
+			return material;
 		}
 
 		private void RecalculateProps(Vector2 size) {
