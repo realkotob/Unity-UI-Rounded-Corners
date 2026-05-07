@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using System.Text;
 using UnityEditor;
 using UnityEditor.SceneManagement;
 using UnityEngine;
@@ -9,11 +10,58 @@ namespace Nobi.UiRoundedCorners.EditorTools {
 	internal static class RoundedCornersOverrideCleaner {
 		private const string MenuRoot = "Tools/UI Rounded Corners/";
 
+		[MenuItem(MenuRoot + "Diagnose Material Overrides (Open Scenes + Selection)")]
+		private static void Diagnose() {
+			var sb = new StringBuilder();
+			sb.AppendLine("[RoundedCornersOverrideCleaner] Diagnosis:");
+
+			for (var s = 0; s < SceneManager.sceneCount; s++) {
+				var scene = SceneManager.GetSceneAt(s);
+				if (!scene.isLoaded) continue;
+				sb.AppendLine($"-- Scene: {scene.name} --");
+				foreach (var go in scene.GetRootGameObjects()) {
+					DiagnoseRoot(go, sb);
+				}
+			}
+
+			foreach (var sel in Selection.gameObjects) {
+				sb.AppendLine($"-- Selection: {sel.name} --");
+				DiagnoseRoot(sel, sb);
+			}
+
+			Debug.Log(sb.ToString());
+		}
+
+		private static void DiagnoseRoot(GameObject root, StringBuilder sb) {
+			var graphics = new List<Graphic>();
+			root.GetComponentsInChildren(includeInactive: true, results: graphics);
+
+			foreach (var g in graphics) {
+				if (!HasRoundedCornersComponent(g.gameObject)) continue;
+
+				var path = GetHierarchyPath(g.transform);
+				var so = new SerializedObject(g);
+				var prop = so.FindProperty("m_Material");
+				var mat = prop != null ? prop.objectReferenceValue as Material : null;
+				var shader = mat != null ? mat.shader : null;
+				var shaderName = shader != null ? shader.name : "(null shader)";
+				var isInstance = PrefabUtility.IsPartOfPrefabInstance(g);
+				var hasOverride = isInstance && prop != null && prop.prefabOverride;
+
+				sb.Append("  ").Append(path)
+				  .Append(" | m_Material=").Append(mat == null ? "null" : mat.name)
+				  .Append(" | shader=").Append(shaderName)
+				  .Append(" | isInstance=").Append(isInstance)
+				  .Append(" | hasOverride=").Append(hasOverride)
+				  .AppendLine();
+			}
+		}
+
 		[MenuItem(MenuRoot + "Clear Leaked Material Overrides (Prefab Assets)")]
 		private static void CleanPrefabAssets() {
 			if (!EditorUtility.DisplayDialog(
 				"Clear Leaked Material Overrides",
-				"Scan every prefab under Assets/ and clear any Graphic.m_Material that points at a rounded-corners shader instance. This will modify and save prefab assets. Make sure your changes are committed first.",
+				"Scan every prefab under Assets/ and clear Graphic.m_Material on objects that have a rounded-corners component. This will modify and save prefab assets. Make sure your changes are committed first.",
 				"Run", "Cancel")) return;
 
 			var guids = AssetDatabase.FindAssets("t:Prefab");
@@ -27,11 +75,12 @@ namespace Nobi.UiRoundedCorners.EditorTools {
 
 					var root = PrefabUtility.LoadPrefabContents(path);
 					try {
-						var cleared = ClearOnRoot(root);
+						var cleared = ClearOnPrefabAssetRoot(root);
 						if (cleared > 0) {
 							PrefabUtility.SaveAsPrefabAsset(root, path);
 							totalCleared += cleared;
 							prefabsTouched++;
+							Debug.Log($"[RoundedCornersOverrideCleaner] Cleared {cleared} on prefab: {path}");
 						}
 					} finally {
 						PrefabUtility.UnloadPrefabContents(root);
@@ -42,16 +91,17 @@ namespace Nobi.UiRoundedCorners.EditorTools {
 			}
 
 			AssetDatabase.SaveAssets();
-			Debug.Log($"[RoundedCornersOverrideCleaner] Cleared {totalCleared} material reference(s) across {prefabsTouched} prefab(s).");
+			Debug.Log($"[RoundedCornersOverrideCleaner] Done. Cleared {totalCleared} material reference(s) across {prefabsTouched} prefab(s).");
 		}
 
 		[MenuItem(MenuRoot + "Clear Leaked Material Overrides (Open Scenes)")]
 		private static void CleanOpenScenes() {
 			if (!EditorUtility.DisplayDialog(
 				"Clear Leaked Material Overrides",
-				"Scan every loaded scene and clear instance overrides on Graphic.m_Material that point at rounded-corners shader instances. This will mark scenes dirty so you can save them.",
+				"Scan every loaded scene and revert instance overrides on Graphic.m_Material for objects that have a rounded-corners component. Scenes will be marked dirty so you can save them.",
 				"Run", "Cancel")) return;
 
+			var totalReverted = 0;
 			var totalCleared = 0;
 			var scenesTouched = 0;
 
@@ -59,22 +109,25 @@ namespace Nobi.UiRoundedCorners.EditorTools {
 				var scene = SceneManager.GetSceneAt(s);
 				if (!scene.isLoaded) continue;
 
+				var reverted = 0;
 				var cleared = 0;
 				foreach (var go in scene.GetRootGameObjects()) {
-					cleared += ClearOnRoot(go);
+					ClearOnSceneRoot(go, ref reverted, ref cleared);
 				}
 
-				if (cleared > 0) {
+				if (reverted + cleared > 0) {
 					EditorSceneManager.MarkSceneDirty(scene);
+					totalReverted += reverted;
 					totalCleared += cleared;
 					scenesTouched++;
+					Debug.Log($"[RoundedCornersOverrideCleaner] Scene '{scene.name}': reverted {reverted} prefab override(s), cleared {cleared} non-prefab material(s).");
 				}
 			}
 
-			Debug.Log($"[RoundedCornersOverrideCleaner] Cleared {totalCleared} material reference(s) across {scenesTouched} scene(s). Save the scenes to persist.");
+			Debug.Log($"[RoundedCornersOverrideCleaner] Done. {totalReverted} prefab override(s) reverted, {totalCleared} non-prefab material(s) cleared across {scenesTouched} scene(s). Save scenes to persist.");
 		}
 
-		private static int ClearOnRoot(GameObject root) {
+		private static int ClearOnPrefabAssetRoot(GameObject root) {
 			var cleared = 0;
 			var graphics = new List<Graphic>();
 			root.GetComponentsInChildren(includeInactive: true, results: graphics);
@@ -85,11 +138,7 @@ namespace Nobi.UiRoundedCorners.EditorTools {
 				var so = new SerializedObject(g);
 				var prop = so.FindProperty("m_Material");
 				if (prop == null) continue;
-
-				var mat = prop.objectReferenceValue as Material;
-				if (mat == null) continue;
-				if (mat.shader == null) continue;
-				if (!mat.shader.name.StartsWith("UI/RoundedCorners/")) continue;
+				if (prop.objectReferenceValue == null) continue;
 
 				prop.objectReferenceValue = null;
 				so.ApplyModifiedPropertiesWithoutUndo();
@@ -99,9 +148,48 @@ namespace Nobi.UiRoundedCorners.EditorTools {
 			return cleared;
 		}
 
+		private static void ClearOnSceneRoot(GameObject root, ref int reverted, ref int cleared) {
+			var graphics = new List<Graphic>();
+			root.GetComponentsInChildren(includeInactive: true, results: graphics);
+
+			foreach (var g in graphics) {
+				if (!HasRoundedCornersComponent(g.gameObject)) continue;
+
+				var so = new SerializedObject(g);
+				var prop = so.FindProperty("m_Material");
+				if (prop == null) continue;
+
+				var isInstance = PrefabUtility.IsPartOfPrefabInstance(g);
+
+				if (isInstance && prop.prefabOverride) {
+					// Revert the override entirely so it can never re-apply itself.
+					PrefabUtility.RevertPropertyOverride(prop, InteractionMode.AutomatedAction);
+					reverted++;
+					continue;
+				}
+
+				if (prop.objectReferenceValue != null) {
+					prop.objectReferenceValue = null;
+					so.ApplyModifiedPropertiesWithoutUndo();
+					cleared++;
+				}
+			}
+		}
+
 		private static bool HasRoundedCornersComponent(GameObject go) {
 			return go.GetComponent<ImageWithRoundedCorners>() != null
 				|| go.GetComponent<ImageWithIndependentRoundedCorners>() != null;
+		}
+
+		private static string GetHierarchyPath(Transform t) {
+			var sb = new StringBuilder(t.name);
+			var p = t.parent;
+			while (p != null) {
+				sb.Insert(0, "/");
+				sb.Insert(0, p.name);
+				p = p.parent;
+			}
+			return sb.ToString();
 		}
 	}
 }
