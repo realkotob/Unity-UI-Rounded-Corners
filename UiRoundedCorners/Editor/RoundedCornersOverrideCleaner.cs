@@ -40,20 +40,50 @@ namespace Nobi.UiRoundedCorners.EditorTools {
 				if (!HasRoundedCornersComponent(g.gameObject)) continue;
 
 				var path = GetHierarchyPath(g.transform);
-				var so = new SerializedObject(g);
-				var prop = so.FindProperty("m_Material");
-				var mat = prop != null ? prop.objectReferenceValue as Material : null;
-				var shader = mat != null ? mat.shader : null;
-				var shaderName = shader != null ? shader.name : "(null shader)";
-				var isInstance = PrefabUtility.IsPartOfPrefabInstance(g);
-				var hasOverride = isInstance && prop != null && prop.prefabOverride;
+				sb.Append("  ").Append(path).AppendLine();
 
-				sb.Append("  ").Append(path)
-				  .Append(" | m_Material=").Append(mat == null ? "null" : mat.name)
-				  .Append(" | shader=").Append(shaderName)
-				  .Append(" | isInstance=").Append(isInstance)
-				  .Append(" | hasOverride=").Append(hasOverride)
-				  .AppendLine();
+				DumpAllOverrides(g.gameObject, sb);
+			}
+		}
+
+		private static void DumpAllOverrides(GameObject go, StringBuilder sb) {
+			if (!PrefabUtility.IsPartOfPrefabInstance(go)) {
+				sb.AppendLine("    (not a prefab instance)");
+				return;
+			}
+
+			var instanceRoot = PrefabUtility.GetNearestPrefabInstanceRoot(go);
+			var mods = PrefabUtility.GetPropertyModifications(instanceRoot);
+			if (mods == null || mods.Length == 0) {
+				sb.AppendLine("    (no PropertyModifications on instance root)");
+				return;
+			}
+
+			var anyForThisGo = false;
+			foreach (var mod in mods) {
+				if (mod == null || mod.target == null) continue;
+
+				// Only print mods whose target component is on this GameObject.
+				var comp = mod.target as Component;
+				if (comp == null || comp.gameObject != go) continue;
+
+				anyForThisGo = true;
+				sb.Append("    [")
+				  .Append(comp.GetType().Name)
+				  .Append("] ")
+				  .Append(mod.propertyPath)
+				  .Append(" = ")
+				  .Append(string.IsNullOrEmpty(mod.value) ? "(empty)" : mod.value);
+
+				if (mod.objectReference != null) {
+					sb.Append(" (ref: ").Append(mod.objectReference.GetType().Name)
+					  .Append(" '").Append(mod.objectReference.name).Append("')");
+				}
+				sb.AppendLine();
+			}
+
+			if (!anyForThisGo) {
+				sb.AppendLine("    (no PropertyModifications targeting components on this GO)");
 			}
 		}
 
